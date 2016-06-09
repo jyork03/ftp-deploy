@@ -29,6 +29,8 @@ var FtpDeployer = function () {
 	//var parallelUploads = 1;     // NOTE: this can be added in when sftp is supported
 	var exclude = [];
 	var continueOnError = false;
+	var retries = 10; 						// how many times to retry if it gets hung up on the put operation
+	var totalRetries = 0; 				// keep a record of how many times it had to retry.  mostly for logging
 
 	function canIncludeFile(filePath) {
 		if (exclude.length > 0) {
@@ -97,27 +99,39 @@ var FtpDeployer = function () {
 	function ftpPut(partialFilePath, cb) {
         var remoteFilePath = remoteRoot + "/" + partialFilePath;
         remoteFilePath = remoteFilePath.replace(/\\/g, '/');
-        
+
         var fullLocalPath = path.join(localRoot, partialFilePath);
-        
+
         var emitData = {
             totalFileCount: partialFilePaths.length,
             transferredFileCount: transferredFileCount,
             percentComplete: Math.round((transferredFileCount / partialFilePaths.length) * 100),
-            filename: partialFilePath
+            filename: partialFilePath,
+						totalRetries: totalRetries
         };
-        
+
 		thisDeployer.emit('uploading', emitData);
-		
-		ftp.put(fullLocalPath, remoteFilePath, function (err) {
+
+    var retryCount = 0;
+
+		ftp.put(fullLocalPath, remoteFilePath, function ftpPutError(err) {
 			if (err) {
-				emitData.err = err;
-				thisDeployer.emit('error', emitData); // error event from 0.5.x TODO: either expand error events or remove this
-                thisDeployer.emit('upload-error', emitData);
-                if (continueOnError) {
-					cb();
+				retryCount++;
+				if (retryCount < retries) {
+					totalRetries++;
+					// There is no crying in baseball..
+					console.log("Performing retry " + retryCount + " of " + retries);
+					ftp.put(fullLocalPath, remoteFilePath, ftpPutError);
 				} else {
-					cb(err);
+					// Standard error handling
+					emitData.err = err;
+					thisDeployer.emit('error', emitData); // error event from 0.5.x TODO: either expand error events or remove this
+	                thisDeployer.emit('upload-error', emitData);
+	                if (continueOnError) {
+						cb();
+					} else {
+						cb(err);
+					}
 				}
 			} else {
 				transferredFileCount++;
@@ -127,7 +141,7 @@ var FtpDeployer = function () {
 			}
 		});
 	}
-    
+
     function ftpMakeDirectoriesIfNeeded (cb) {
         async.eachSeries(partialDirectories, ftpMakeRemoteDirectoryIfNeeded, function (err) {
             cb(err);
@@ -138,12 +152,12 @@ var FtpDeployer = function () {
     function ftpMakeRemoteDirectoryIfNeeded(partialRemoteDirectory, cb) {
         // add the remote root, and clean up the slashes
         var fullRemoteDirectory = remoteRoot + '/' + partialRemoteDirectory.replace(/\\/gi, '/');
-        
+
         // add leading slash if it is missing
         if (fullRemoteDirectory.charAt(0) !== '/') {
             fullRemoteDirectory = '/' + fullRemoteDirectory;
         }
-        
+
         // remove double // if present
         fullRemoteDirectory = fullRemoteDirectory.replace(/\/\//g, "/");
         ftp.raw.cwd(fullRemoteDirectory, function(err) {
@@ -161,7 +175,7 @@ var FtpDeployer = function () {
         });
     }
 
-    
+
 	this.deploy = function (config, cb) {
         // Prompt for password if none was given
         if (!config.password) {
@@ -189,7 +203,7 @@ var FtpDeployer = function () {
 
         ftp.useList = true;
         toTransfer = dirParseSync(localRoot);
-        
+
         // Authentication and main processing of files
         ftp.auth(config.username, config.password, function (err) {
             if (err) {
